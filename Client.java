@@ -19,6 +19,18 @@ public class Client {
     }
 
     public static void main(String[] args) {
+        // Vérifie qu’un mot de passe a bien été fourni
+        if (args.length < 1) {
+            System.out.println("Usage: java Client <password>");
+            return; // stoppe le programme si pas d’argument
+        }
+
+        // Récupération du mot de passe fourni en ligne de commande
+        String password = args[0];
+
+        // Affichage du mot de passe
+        System.out.println("[Client] Password provided: " + password);
+
         System.out.println("Starting client ...");
         Client client = new Client();
         client.start();
