@@ -2,6 +2,11 @@ import java.io.*;
 import java.net.*;
 import java.util.Scanner;
 
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.SecretKeySpec;
+import java.util.Arrays;
 
 public class Client {
     private static final String SERVER_HOST = "localhost";
@@ -13,12 +18,31 @@ public class Client {
     private Interceptor interceptor;
     private volatile boolean running;
 
+
+     /* Dérive une clé AES-128 à partir d'un mot de passe en utilisant SHA-256.
+     - SHA-256 produit 32 octets (256 bits)
+     - AES-128 nécessite 16 octets (128 bits) -> on tronque à 16 octets */
+    private static SecretKey deriveAesKey(String password) throws NoSuchAlgorithmException {
+
+        // Fournit l'implémentation de la fonction de hachage SHA-256
+        MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+
+        // On transforme le mot de passe (String) en octets, puis on calcule son hash (32 bytes)
+        byte[] fullHash = sha256.digest(password.getBytes());
+
+        // AES-128 nécessite exactement 16 bytes -> on prend les 16 premiers octets du hash
+        byte[] aesKeyBytes = Arrays.copyOf(fullHash, 16);
+
+        // On construit un objet "SecretKey" compatible AES à partir des 16 octets
+        return new SecretKeySpec(aesKeyBytes, "AES");
+    }
+
     public Client() {
         this.interceptor = new Interceptor();
         this.running = true;
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws NoSuchAlgorithmException {
         // Vérifie qu’un mot de passe a bien été fourni
         if (args.length < 1) {
             System.out.println("Usage: java Client <password>");
@@ -30,6 +54,13 @@ public class Client {
 
         // Affichage du mot de passe
         System.out.println("[Client] Password provided: " + password);
+
+
+        // Dérive une clé AES-128 depuis le mot de passe (SHA-256 puis tronquage à 16 bytes)
+        SecretKey aesKey = deriveAesKey(password);
+
+        // Debug (preuve que la clé existe) : AES-128 -> 16 bytes
+        System.out.println("[Client] AES key length: " + aesKey.getEncoded().length + " bytes");
 
         System.out.println("Starting client ...");
         Client client = new Client();
