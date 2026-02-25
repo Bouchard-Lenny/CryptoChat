@@ -6,6 +6,8 @@ public class ServerInterceptor {
 
     public String onMessageRelay(String message, int fromClient, int toClient) {
         // Honest relay - no modification
+
+        /* Etape precedente
         // MITM
         // Ici, le trafic est chiffré en ROT13 par les clients, donc l'attaquant
         // peut retrouver le clair en appliquant ROT13 à nouveau.
@@ -14,6 +16,7 @@ public class ServerInterceptor {
         // Affichage côté serveur (attaquant) : ce qui circule (cipher) et le clair reconstitué
         System.out.println("[MITM] Intercepted cipher: " + message);
         System.out.println("[MITM] Decrypted clear  : " + clear);
+        */
 
 		System.out.println("Relaying from " + fromClient + " to client " + toClient + " : " + message);
         return message;

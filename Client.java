@@ -37,9 +37,21 @@ public class Client {
         return new SecretKeySpec(aesKeyBytes, "AES");
     }
 
-    public Client() {
-        this.interceptor = new Interceptor();
-        this.running = true;
+    public Client(String password) {
+        try {
+            // Dérive la clé AES-128 à partir du mot de passe
+            javax.crypto.SecretKey aesKey = deriveAesKey(password);
+            // Debug (preuve que la clé existe) : AES-128 -> 16 bytes
+            System.out.println("[Client] AES key length: " + aesKey.getEncoded().length + " bytes");
+
+            // Interceptor utilise AES-CBC + Base64
+            this.interceptor = new Interceptor(aesKey);
+
+            this.running = true;
+        } catch (NoSuchAlgorithmException e) {
+            // SHA-256 est censé exister ; si ça arrive, on arrête avec une erreur claire
+            throw new RuntimeException("SHA-256 not available on this JVM", e);
+        }
     }
 
     public static void main(String[] args) throws NoSuchAlgorithmException {
@@ -52,18 +64,12 @@ public class Client {
         // Récupération du mot de passe fourni en ligne de commande
         String password = args[0];
 
+        Client client = new Client(password);
+
         // Affichage du mot de passe
         System.out.println("[Client] Password provided: " + password);
 
-
-        // Dérive une clé AES-128 depuis le mot de passe (SHA-256 puis tronquage à 16 bytes)
-        SecretKey aesKey = deriveAesKey(password);
-
-        // Debug (preuve que la clé existe) : AES-128 -> 16 bytes
-        System.out.println("[Client] AES key length: " + aesKey.getEncoded().length + " bytes");
-
         System.out.println("Starting client ...");
-        Client client = new Client();
         client.start();
     }
 
