@@ -1,3 +1,5 @@
+import java.util.Base64;
+
 
 public class ServerInterceptor {
     public ServerInterceptor() {
@@ -17,6 +19,12 @@ public class ServerInterceptor {
         System.out.println("[MITM] Intercepted cipher: " + message);
         System.out.println("[MITM] Decrypted clear  : " + clear);
         */
+
+        // MITM active : modification du message chiffré en transit
+        if (ENABLE_TAMPER_ATTACK) {
+            System.out.println("[MITM] Tampering ciphertext before relay...");
+            message = tamperBase64Ciphertext(message);
+        }
 
 		System.out.println("Relaying from " + fromClient + " to client " + toClient + " : " + message);
         return message;
@@ -45,5 +53,33 @@ public class ServerInterceptor {
         }
 
         return out.toString();
+    }
+
+
+    // Active/désactive l'attaque de modification (MITM active)
+    private static final boolean ENABLE_TAMPER_ATTACK = true;
+
+     // Modifie un message chiffré encodé en Base64 en flipant 1 bit.
+    private static String tamperBase64Ciphertext(String encryptedB64) {
+        byte[] packet = Base64.getDecoder().decode(encryptedB64);
+
+        int ivLen = 16;
+        int ctLen = packet.length - ivLen;
+
+        // Il faut au minimum 3 blocs ciphertext (48 bytes) pour pouvoir modifier un bloc
+        // qui n'est ni le dernier ni l'avant-dernier pour eviter une erreur de padding.
+        if (ctLen < 16 * 3) {
+            // Message trop court -> si on modifie, on casse souvent le padding.
+            System.out.println("[MITM] Ciphertext too short to tamper safely (would hit padding).");
+            return encryptedB64;
+        }
+
+        // On modifie 1 byte dans le 1er bloc ciphertext
+        // on est loin du padding final -> déchiffrement devrait réussir mais plaintext corrompu.
+        int index = ivLen + 0; // premier octet du premier bloc ciphertext
+
+        packet[index] = (byte) (packet[index] ^ 0x01);
+
+        return Base64.getEncoder().encodeToString(packet);
     }
 }
