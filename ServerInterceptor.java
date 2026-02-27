@@ -7,18 +7,6 @@ public class ServerInterceptor {
     }
 
     public String onMessageRelay(String message, int fromClient, int toClient) {
-        // Honest relay - no modification
-
-        /* Etape precedente
-        // MITM
-        // Ici, le trafic est chiffré en ROT13 par les clients, donc l'attaquant
-        // peut retrouver le clair en appliquant ROT13 à nouveau.
-        String clear = rot13(message);
-
-        // Affichage côté serveur (attaquant) : ce qui circule (cipher) et le clair reconstitué
-        System.out.println("[MITM] Intercepted cipher: " + message);
-        System.out.println("[MITM] Decrypted clear  : " + clear);
-        */
 
         // MITM active : modification du message chiffré en transit
         if (ENABLE_TAMPER_ATTACK) {
@@ -63,21 +51,17 @@ public class ServerInterceptor {
     private static String tamperBase64Ciphertext(String encryptedB64) {
         byte[] packet = Base64.getDecoder().decode(encryptedB64);
 
-        int ivLen = 16;
-        int ctLen = packet.length - ivLen;
+        // L'IV fait 12 octets
+        int ivLen = 12;
 
-        // Il faut au minimum 3 blocs ciphertext (48 bytes) pour pouvoir modifier un bloc
-        // qui n'est ni le dernier ni l'avant-dernier pour eviter une erreur de padding.
-        if (ctLen < 16 * 3) {
-            // Message trop court -> si on modifie, on casse souvent le padding.
-            System.out.println("[MITM] Ciphertext too short to tamper safely (would hit padding).");
+        // Il faut au minimum IV + 1 octet pour pouvoir modifier quelque chose
+        if (packet.length <= ivLen) {
+            System.out.println("[MITM] Packet too short to tamper.");
             return encryptedB64;
         }
 
-        // On modifie 1 byte dans le 1er bloc ciphertext
-        // on est loin du padding final -> déchiffrement devrait réussir mais plaintext corrompu.
-        int index = ivLen + 0; // premier octet du premier bloc ciphertext
-
+        // On modifie 1 octet juste après l'IV (dans ciphertext||tag)
+        int index = ivLen; // premier octet après l'IV
         packet[index] = (byte) (packet[index] ^ 0x01);
 
         return Base64.getEncoder().encodeToString(packet);

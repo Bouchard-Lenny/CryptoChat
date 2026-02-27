@@ -11,6 +11,9 @@ import javax.crypto.spec.IvParameterSpec;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 
+import javax.crypto.AEADBadTagException;
+import javax.crypto.spec.GCMParameterSpec;
+
 
 public class Interceptor {
 
@@ -33,76 +36,65 @@ public class Interceptor {
     }
 
     public String beforeSend(String plainText) {
-        /* Code de base
         try {
-           System.out.println("[Interceptor] Encrypting message: " + plainText);
-			return rot13(plainText);
-        } catch (Exception e) {
-            throw new RuntimeException("Encryption failed", e);
-        }*/
+            System.out.println("[Interceptor] Encrypting message (AES-GCM): " + plainText);
 
-        try {
-            System.out.println("[Interceptor] Encrypting message (AES-CBC): " + plainText);
-
-            // 1) Génère un IV aléatoire de 16 bytes (obligatoire en CBC)
-            byte[] iv = new byte[AES_BLOCK_SIZE];
+            // 1) Génère un IV aléatoire de 12 octets (obligatoire en GCM)
+            byte[] iv = new byte[GCM_IV_LENGTH_BYTES];
             random.nextBytes(iv);
 
-            // 2) Initialise AES/CBC avec padding standard PKCS5Padding
-            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            cipher.init(Cipher.ENCRYPT_MODE, aesKey, new IvParameterSpec(iv));
+            // 2) Initialise AES/GCM
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            GCMParameterSpec spec = new GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv);
+            cipher.init(Cipher.ENCRYPT_MODE, aesKey, spec);
 
-            // 3) Chiffre le message (UTF-8 -> bytes)
-            byte[] ciphertext = cipher.doFinal(plainText.getBytes(StandardCharsets.UTF_8));
+            // 3) Chiffre : doFinal renvoie (ciphertext || tag) automatiquement
+            byte[] ciphertextAndTag = cipher.doFinal(plainText.getBytes(StandardCharsets.UTF_8));
 
-            // 4) Concatène IV || ciphertext pour permettre le déchiffrement
-            byte[] packet = new byte[iv.length + ciphertext.length];
+            // 4) Concatène IV || (ciphertext||tag)
+            byte[] packet = new byte[iv.length + ciphertextAndTag.length];
             System.arraycopy(iv, 0, packet, 0, iv.length);
-            System.arraycopy(ciphertext, 0, packet, iv.length, ciphertext.length);
+            System.arraycopy(ciphertextAndTag, 0, packet, iv.length, ciphertextAndTag.length);
 
-            // 5) Encode en Base64 pour affichage et transport texte
+            // 5) Encode en Base64 pour transport texte
             return Base64.getEncoder().encodeToString(packet);
 
         } catch (Exception e) {
             throw new RuntimeException("AES-CBC encryption failed", e);
         }
+
     }
 
     public String afterReceive(String encryptedText) {
-        /* Code de base
         try {
-            System.out.println("[Interceptor] Decrypting message...");
-			return rot13(encryptedText);
-        } catch (Exception e) {
-            return "[Decryption failed: " + e.getMessage() + "]";
-        }*/
+            System.out.println("[Interceptor] Decrypting message (AES-GCM) ...");
 
-        try {
-            System.out.println("[Interceptor] Decrypting message (AES-CBC) ...");
-
-            // 1) Décodage Base64 -> bytes (IV || ciphertext)
+            // 1) Décodage Base64 -> bytes (IV || (ciphertext||tag))
             byte[] packet = Base64.getDecoder().decode(encryptedText);
 
             // Vérifie qu'on a au moins un IV complet
-            if (packet.length < AES_BLOCK_SIZE) {
+            if (packet.length < GCM_IV_LENGTH_BYTES) {
                 return "[Decryption failed: packet too short]";
             }
 
-            // 2) Sépare IV et ciphertext
-            byte[] iv = new byte[AES_BLOCK_SIZE];
-            byte[] ciphertext = new byte[packet.length - AES_BLOCK_SIZE];
+            // 2) Sépare IV et (ciphertext||tag)
+            byte[] iv = new byte[GCM_IV_LENGTH_BYTES];
+            byte[] ciphertextAndTag = new byte[packet.length - GCM_IV_LENGTH_BYTES];
 
-            System.arraycopy(packet, 0, iv, 0, AES_BLOCK_SIZE);
-            System.arraycopy(packet, AES_BLOCK_SIZE, ciphertext, 0, ciphertext.length);
+            System.arraycopy(packet, 0, iv, 0, GCM_IV_LENGTH_BYTES);
+            System.arraycopy(packet, GCM_IV_LENGTH_BYTES, ciphertextAndTag, 0, ciphertextAndTag.length);
 
-            // 3) Initialise le déchiffrement AES/CBC avec le même IV
-            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            cipher.init(Cipher.DECRYPT_MODE, aesKey, new IvParameterSpec(iv));
+            // 3) Initialise AES/GCM en déchiffrement
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            GCMParameterSpec spec = new GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv);
+            cipher.init(Cipher.DECRYPT_MODE, aesKey, spec);
 
-            // 4) Déchiffre et reconvertit en String UTF-8
-            byte[] clearBytes = cipher.doFinal(ciphertext);
+            // 4) Déchiffre + vérifie le tag
+            byte[] clearBytes = cipher.doFinal(ciphertextAndTag);
             return new String(clearBytes, StandardCharsets.UTF_8);
 
+        } catch (AEADBadTagException e) {
+            return "[Authentication failed: message altered (GCM tag invalid)]";
         } catch (Exception e) {
             return "[Decryption failed: " + e.getMessage() + "]";
         }
@@ -136,6 +128,10 @@ public class Interceptor {
     // Aléa crypto sûr pour générer un IV différent à chaque message
     private final SecureRandom random = new SecureRandom();
 
-    // AES utilise un bloc de 16 octets -> IV de 16 octets en CBC
-    private static final int AES_BLOCK_SIZE = 16;
+    // Paramètres AES-GCM
+    // IV recommandé pour GCM : 12 octets (96 bits)
+    private static final int GCM_IV_LENGTH_BYTES = 12;
+
+    // Tag d'authentification GCM : 128 bits (standard)
+    private static final int GCM_TAG_LENGTH_BITS = 128;
 }

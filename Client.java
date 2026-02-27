@@ -44,7 +44,7 @@ public class Client {
             // Debug (preuve que la clé existe) : AES-128 -> 16 bytes
             System.out.println("[Client] AES key length: " + aesKey.getEncoded().length + " bytes");
 
-            // Interceptor utilise AES-CBC + Base64
+            // Interceptor utilise AES-GCM + Base64
             this.interceptor = new Interceptor(aesKey);
 
             this.running = true;
