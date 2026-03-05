@@ -45,7 +45,7 @@ public class ServerInterceptor {
 
 
     // Active/désactive l'attaque de modification (MITM active)
-    private static final boolean ENABLE_TAMPER_ATTACK = true;
+    private static final boolean ENABLE_TAMPER_ATTACK = false;
 
      // Modifie un message chiffré encodé en Base64 en flipant 1 bit.
     private static String tamperBase64Ciphertext(String encryptedB64) {

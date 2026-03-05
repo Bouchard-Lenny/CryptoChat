@@ -14,24 +14,72 @@ import java.security.SecureRandom;
 import javax.crypto.AEADBadTagException;
 import javax.crypto.spec.GCMParameterSpec;
 
+import java.util.Arrays;
 
 public class Interceptor {
 
 
-    // Constructeur : l'Interceptor doit connaître la clé AES
-    public Interceptor(SecretKey aesKey) {
-        this.aesKey = aesKey;
+    // Constructeur sans clé AES.
+    // La clé sera générée pendant le handshake ECDH.
+    public Interceptor() {
     }
 
     public void onHandshake(BufferedReader input, PrintWriter output) throws IOException {
+        System.out.println("[Interceptor] Starting ECDH handshake...");
+
         try {
-            System.out.println("[Interceptor] Starting handshake");
 
-            
+            // Génération d'une paire de clés ECDH
+            KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
 
-            System.out.println("[Interceptor] Handshake complete!");
+            // Courbe elliptique secp256r1 (~128 bits de sécurité)
+            kpg.initialize(256);
+
+            KeyPair keyPair = kpg.generateKeyPair();
+
+            PublicKey myPublicKey = keyPair.getPublic();
+
+            // Envoi de notre clé publique (encodée en Base64)
+            String myPublicKeyB64 = Base64.getEncoder().encodeToString(myPublicKey.getEncoded());
+            output.println(myPublicKeyB64);
+
+            System.out.println("[Handshake] Sent public key");
+
+            // Réception de la clé publique distante
+            String receivedKeyB64 = input.readLine();
+
+            byte[] receivedKeyBytes = Base64.getDecoder().decode(receivedKeyB64);
+
+            KeyFactory keyFactory = KeyFactory.getInstance("EC");
+            X509EncodedKeySpec keySpec = new X509EncodedKeySpec(receivedKeyBytes);
+
+            PublicKey otherPublicKey = keyFactory.generatePublic(keySpec);
+
+            System.out.println("[Handshake] Received public key");
+
+            // Calcul du secret partagé ECDH
+            KeyAgreement ka = KeyAgreement.getInstance("ECDH");
+            ka.init(keyPair.getPrivate());
+
+            ka.doPhase(otherPublicKey, true);
+
+            byte[] sharedSecret = ka.generateSecret();
+
+            System.out.println("[Handshake] Shared secret computed");
+
+            // Dérivation de la clé AES à partir du secret partagé
+            MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+
+            byte[] hash = sha256.digest(sharedSecret);
+
+            byte[] aesKeyBytes = Arrays.copyOf(hash, 16);
+
+            aesKey = new SecretKeySpec(aesKeyBytes, "AES");
+
+            System.out.println("[Handshake] AES session key established!");
+
         } catch (Exception e) {
-            throw new IOException("Handshake failed", e);
+            throw new IOException("ECDH handshake failed", e);
         }
     }
 
@@ -122,8 +170,8 @@ public class Interceptor {
         return result.toString();
     }
 
-    // Clé AES partagée
-    private final SecretKey aesKey;
+    // Clé AES partagée qui sera dérivée après l'échange ECDH
+    private SecretKey aesKey;
 
     // Aléa crypto sûr pour générer un IV différent à chaque message
     private final SecureRandom random = new SecureRandom();

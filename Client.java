@@ -37,37 +37,21 @@ public class Client {
         return new SecretKeySpec(aesKeyBytes, "AES");
     }
 
-    public Client(String password) {
-        try {
-            // Dérive la clé AES-128 à partir du mot de passe
-            javax.crypto.SecretKey aesKey = deriveAesKey(password);
-            // Debug (preuve que la clé existe) : AES-128 -> 16 bytes
-            System.out.println("[Client] AES key length: " + aesKey.getEncoded().length + " bytes");
+    public Client() {
 
-            // Interceptor utilise AES-GCM + Base64
-            this.interceptor = new Interceptor(aesKey);
+        // L'interceptor ne reçoit plus de clé AES au départ.
+        // La clé sera établie pendant le handshake ECDH.
+        this.interceptor = new Interceptor();
 
-            this.running = true;
-        } catch (NoSuchAlgorithmException e) {
-            // SHA-256 est censé exister ; si ça arrive, on arrête avec une erreur claire
-            throw new RuntimeException("SHA-256 not available on this JVM", e);
-        }
+        this.running = true;
     }
 
     public static void main(String[] args) throws NoSuchAlgorithmException {
-        // Vérifie qu’un mot de passe a bien été fourni
-        if (args.length < 1) {
-            System.out.println("Usage: java Client <password>");
-            return; // stoppe le programme si pas d’argument
-        }
 
-        // Récupération du mot de passe fourni en ligne de commande
-        String password = args[0];
+        // Plus de mot de passe.
+        Client client = new Client();
 
-        Client client = new Client(password);
-
-        // Affichage du mot de passe
-        System.out.println("[Client] Password provided: " + password);
+        System.out.println("[Client] No password required");
 
         System.out.println("Starting client ...");
         client.start();
