@@ -2,11 +2,15 @@ import java.io.*;
 import java.net.*;
 import java.util.Scanner;
 
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
+import java.security.*;
+import java.security.spec.*;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
 import java.util.Arrays;
+
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.Base64;
 
 public class Client {
     private static final String SERVER_HOST = "localhost";
@@ -17,6 +21,12 @@ public class Client {
     private PrintWriter output;
     private Interceptor interceptor;
     private volatile boolean running;
+
+    // Clé privée ECDSA long terme du client.
+    private PrivateKey ecdsaPrivateKey;
+
+    // Clé publique ECDSA long terme du client.
+    private PublicKey ecdsaPublicKey;
 
 
      /* Dérive une clé AES-128 à partir d'un mot de passe en utilisant SHA-256.
@@ -37,21 +47,92 @@ public class Client {
         return new SecretKeySpec(aesKeyBytes, "AES");
     }
 
-    public Client() {
 
-        // L'interceptor ne reçoit plus de clé AES au départ.
-        // La clé sera établie pendant le handshake ECDH.
-        this.interceptor = new Interceptor();
+    // Charge une clé privée ECDSA au format PEM (PKCS8) depuis un fichier.
+    private static PrivateKey loadPrivateKeyFromPem(String path) throws Exception {
+        // Lit tout le contenu texte du fichier PEM
+        String pem = Files.readString(Paths.get(path));
 
-        this.running = true;
+        // Supprime l'en-tête, le pied de page et les retours à la ligne
+        pem = pem.replace("-----BEGIN PRIVATE KEY-----", "")
+                .replace("-----END PRIVATE KEY-----", "")
+                .replace("-----BEGIN EC PRIVATE KEY-----", "")
+                .replace("-----END EC PRIVATE KEY-----", "")
+                .replaceAll("\\s", "");
+
+        // Décode la partie Base64 du PEM
+        byte[] keyBytes = Base64.getDecoder().decode(pem);
+
+        // Construit une clé privée EC à partir des octets
+        KeyFactory keyFactory = KeyFactory.getInstance("EC");
+
+        // PKCS8 = format standard courant pour les clés privées
+        PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(keyBytes);
+
+        return keyFactory.generatePrivate(keySpec);
+    }
+
+     // Charge une clé publique ECDSA au format PEM (X.509 / SubjectPublicKeyInfo).
+    private static PublicKey loadPublicKeyFromPem(String path) throws Exception {
+        // Lit tout le contenu texte du fichier PEM
+        String pem = Files.readString(Paths.get(path));
+
+        // Supprime l'en-tête, le pied de page et les espaces
+        pem = pem.replace("-----BEGIN PUBLIC KEY-----", "")
+                .replace("-----END PUBLIC KEY-----", "")
+                .replaceAll("\\s", "");
+
+        // Décode la partie Base64
+        byte[] keyBytes = Base64.getDecoder().decode(pem);
+
+        // Reconstruit la clé publique EC
+        KeyFactory keyFactory = KeyFactory.getInstance("EC");
+
+        // X509EncodedKeySpec = format standard des clés publiques
+        X509EncodedKeySpec keySpec = new X509EncodedKeySpec(keyBytes);
+
+        return keyFactory.generatePublic(keySpec);
+    }
+
+
+    public Client(String privateKeyPath, String publicKeyPath) {
+        try {
+            // Charge la clé privée ECDSA du client depuis le fichier PEM
+            this.ecdsaPrivateKey = loadPrivateKeyFromPem(privateKeyPath);
+
+            // Charge la clé publique ECDSA du client depuis le fichier PEM
+            this.ecdsaPublicKey = loadPublicKeyFromPem(publicKeyPath);
+
+            System.out.println("[Client] ECDSA private key loaded successfully");
+            System.out.println("[Client] ECDSA public key loaded successfully");
+
+            // L'interceptor reçoit maintenant les clés ECDSA long terme.
+            this.interceptor = new Interceptor(ecdsaPrivateKey, ecdsaPublicKey);
+
+            this.running = true;
+
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to load ECDSA key pair", e);
+        }
     }
 
     public static void main(String[] args) throws NoSuchAlgorithmException {
 
-        // Plus de mot de passe.
-        Client client = new Client();
+        // Le client doit recevoir en paramètre :
+        // - le chemin vers sa clé privée ECDSA long terme
+        // - le chemin vers sa clé publique ECDSA long terme
+        if (args.length < 2) {
+            System.out.println("Usage: java Client <ecdsa_private_key.pem> <ecdsa_public_key.pem>");
+            return;
+        }
 
-        System.out.println("[Client] No password required");
+        String privateKeyPath = args[0];
+        String publicKeyPath = args[1];
+
+        Client client = new Client(privateKeyPath, publicKeyPath);
+
+        System.out.println("[Client] ECDSA key pair provided via command line");
+
 
         System.out.println("Starting client ...");
         client.start();

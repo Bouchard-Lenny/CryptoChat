@@ -19,67 +19,119 @@ import java.util.Arrays;
 public class Interceptor {
 
 
-    // Constructeur sans clé AES.
-    // La clé sera générée pendant le handshake ECDH.
-    public Interceptor() {
+    // Constructeur de l'interceptor.
+    // Il reçoit la paire de clés ECDSA long terme du client.
+    public Interceptor(PrivateKey ecdsaPrivateKey, PublicKey ecdsaPublicKey) {
+        this.ecdsaPrivateKey = ecdsaPrivateKey;
+        this.ecdsaPublicKey = ecdsaPublicKey;
+    }
+
+
+    // Signe la clé publique ECDH avec la clé privée ECDSA long terme
+    private byte[] signWithEcdsa(byte[] data) throws Exception {
+        Signature signature = Signature.getInstance("SHA256withECDSA");
+        signature.initSign(ecdsaPrivateKey);
+        signature.update(data);
+        return signature.sign();
+    }
+
+    // Vérifie la signature de la clé publique ECDH reçue
+    private boolean verifyEcdsaSignature(byte[] data, byte[] signatureBytes, PublicKey signingPublicKey) throws Exception {
+        Signature signature = Signature.getInstance("SHA256withECDSA");
+        signature.initVerify(signingPublicKey);
+        signature.update(data);
+        return signature.verify(signatureBytes);
     }
 
     public void onHandshake(BufferedReader input, PrintWriter output) throws IOException {
-        System.out.println("[Interceptor] Starting ECDH handshake...");
-
         try {
+            System.out.println("[Interceptor] Starting signed ECDH handshake...");
+            System.out.println("[Handshake] Long-term ECDSA keys are loaded");
 
-            // Génération d'une paire de clés ECDH
+            // Génère la paire ECDH éphémère de la session
             KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
-
-            // Courbe elliptique secp256r1 (~128 bits de sécurité)
             kpg.initialize(256);
+            KeyPair ecdhKeyPair = kpg.generateKeyPair();
 
-            KeyPair keyPair = kpg.generateKeyPair();
+            PublicKey myEcdhPublicKey = ecdhKeyPair.getPublic();
+            byte[] myEcdhPublicKeyBytes = myEcdhPublicKey.getEncoded();
 
-            PublicKey myPublicKey = keyPair.getPublic();
+            // Signe la clé publique ECDH avec la clé ECDSA long terme
+            byte[] mySignature = signWithEcdsa(myEcdhPublicKeyBytes);
 
-            // Envoi de notre clé publique (encodée en Base64)
-            String myPublicKeyB64 = Base64.getEncoder().encodeToString(myPublicKey.getEncoded());
-            output.println(myPublicKeyB64);
+            // Prépare les données à envoyer
+            String myEcdhPublicKeyB64 = Base64.getEncoder().encodeToString(myEcdhPublicKeyBytes);
+            String myEcdsaPublicKeyB64 = Base64.getEncoder().encodeToString(ecdsaPublicKey.getEncoded());
+            String mySignatureB64 = Base64.getEncoder().encodeToString(mySignature);
 
-            System.out.println("[Handshake] Sent public key");
+            // Envoie : pubECDH, pubECDSA, signature(pubECDH)
+            output.println(myEcdhPublicKeyB64);
+            output.println(myEcdsaPublicKeyB64);
+            output.println(mySignatureB64);
 
-            // Réception de la clé publique distante
-            String receivedKeyB64 = input.readLine();
+            System.out.println("[Handshake] Sent ECDH public key");
+            System.out.println("[Handshake] Sent ECDSA public key");
+            System.out.println("[Handshake] Sent signature");
 
-            byte[] receivedKeyBytes = Base64.getDecoder().decode(receivedKeyB64);
+            // Reçoit les 3 éléments du pair
+            String receivedEcdhPublicKeyB64 = input.readLine();
+            String receivedEcdsaPublicKeyB64 = input.readLine();
+            String receivedSignatureB64 = input.readLine();
+
+            if (receivedEcdhPublicKeyB64 == null || receivedEcdsaPublicKeyB64 == null || receivedSignatureB64 == null) {
+                throw new IOException("Handshake failed: missing signed handshake data");
+            }
+
+            byte[] receivedEcdhPublicKeyBytes = Base64.getDecoder().decode(receivedEcdhPublicKeyB64);
+            byte[] receivedEcdsaPublicKeyBytes = Base64.getDecoder().decode(receivedEcdsaPublicKeyB64);
+            byte[] receivedSignatureBytes = Base64.getDecoder().decode(receivedSignatureB64);
 
             KeyFactory keyFactory = KeyFactory.getInstance("EC");
-            X509EncodedKeySpec keySpec = new X509EncodedKeySpec(receivedKeyBytes);
 
-            PublicKey otherPublicKey = keyFactory.generatePublic(keySpec);
+            // Reconstruit la clé publique ECDSA reçue
+            X509EncodedKeySpec ecdsaKeySpec = new X509EncodedKeySpec(receivedEcdsaPublicKeyBytes);
+            PublicKey receivedEcdsaPublicKey = keyFactory.generatePublic(ecdsaKeySpec);
 
-            System.out.println("[Handshake] Received public key");
+            System.out.println("[Handshake] Received ECDH public key");
+            System.out.println("[Handshake] Received ECDSA public key");
+            System.out.println("[Handshake] Received signature");
 
-            // Calcul du secret partagé ECDH
+            // Vérifie que pubECDH a bien été signée avec pubECDSA
+            boolean signatureValid = verifyEcdsaSignature(
+                    receivedEcdhPublicKeyBytes,
+                    receivedSignatureBytes,
+                    receivedEcdsaPublicKey
+            );
+
+            if (!signatureValid) {
+                throw new IOException("Handshake failed: invalid ECDSA signature on ECDH public key");
+            }
+
+            System.out.println("[Handshake] Signature is valid");
+
+            // Reconstruit la clé publique ECDH reçue
+            X509EncodedKeySpec ecdhKeySpec = new X509EncodedKeySpec(receivedEcdhPublicKeyBytes);
+            PublicKey otherEcdhPublicKey = keyFactory.generatePublic(ecdhKeySpec);
+
+            // Calcule le secret partagé ECDH
             KeyAgreement ka = KeyAgreement.getInstance("ECDH");
-            ka.init(keyPair.getPrivate());
-
-            ka.doPhase(otherPublicKey, true);
-
+            ka.init(ecdhKeyPair.getPrivate());
+            ka.doPhase(otherEcdhPublicKey, true);
             byte[] sharedSecret = ka.generateSecret();
 
             System.out.println("[Handshake] Shared secret computed");
 
-            // Dérivation de la clé AES à partir du secret partagé
+            // Dérive la clé AES-128 de session
             MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
-
             byte[] hash = sha256.digest(sharedSecret);
-
             byte[] aesKeyBytes = Arrays.copyOf(hash, 16);
-
             aesKey = new SecretKeySpec(aesKeyBytes, "AES");
 
             System.out.println("[Handshake] AES session key established!");
+            System.out.println("[Interceptor] Signed ECDH handshake complete!");
 
         } catch (Exception e) {
-            throw new IOException("ECDH handshake failed", e);
+            throw new IOException("Signed ECDH handshake failed", e);
         }
     }
 
@@ -182,4 +234,10 @@ public class Interceptor {
 
     // Tag d'authentification GCM : 128 bits (standard)
     private static final int GCM_TAG_LENGTH_BITS = 128;
+
+    // Clé privée ECDSA long terme du client.
+    private final PrivateKey ecdsaPrivateKey;
+
+    // Clé publique ECDSA long terme du client.
+    private final PublicKey ecdsaPublicKey;
 }

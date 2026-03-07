@@ -55,7 +55,7 @@ public class ServerInterceptor {
     // 3.4.2 - MITM ECDH ATTACK
 
     // Active/désactive l'attaque MITM ECDH (3.4.2)
-    private static final boolean ENABLE_MITM_ECDH_ATTACK = true;
+    private static final boolean ENABLE_MITM_ECDH_ATTACK = false;
 
     // Paramètres AES-GCM identiques à ceux des clients
     private static final int GCM_IV_LENGTH_BYTES = 12;
