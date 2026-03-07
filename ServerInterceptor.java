@@ -10,158 +10,181 @@ import javax.crypto.spec.*;
 
 public class ServerInterceptor {
     public ServerInterceptor() {
-        System.out.println("[Server] Honest relay mode");
+        System.out.println("[Server] MITM signed-handshake mode");
     }
 
     public String onMessageRelay(String message, int fromClient, int toClient) {
 
-        // 3.4.2 : Attaque MITM ECDH
-        // Tant que les clés AES de session (K1/K2) ne sont pas établies, on est dans la phase handshake.
-        if (ENABLE_MITM_ECDH_ATTACK && (!isSessionKeyReady(fromClient) || !isSessionKeyReady(toClient))) {
-            return handleMitmHandshake(message, fromClient, toClient);
+        // Pendant le handshake signé, chaque client envoie 3 lignes :
+        // pubECDH, pubECDSA, signature(pubECDH)
+        if (!isSessionKeyReady(fromClient) || !isSessionKeyReady(toClient)) {
+            return handleSignedMitmHandshake(message, fromClient, toClient);
         }
 
-        // Après le handshake, les messages sont du AES-GCM encodé Base64.
-        if (ENABLE_MITM_ECDH_ATTACK && isSessionKeyReady(fromClient) && isSessionKeyReady(toClient)) {
+        SecretKey keyFrom = getSessionKey(fromClient);
+        SecretKey keyTo = getSessionKey(toClient);
 
-            // 1) Déchiffre avec la clé partagée entre MITM et l'émetteur
-            SecretKey keyFrom = getSessionKey(fromClient);
-            String clear = decryptAesGcmBase64(keyFrom, message);
+        String clear = decryptAesGcmBase64(keyFrom, message);
 
-            // Si le message n'est pas déchiffrable (format inconnu, tag invalide, etc.), on le relaie tel quel
-            if (clear == null) {
-                System.out.println("[MITM] Unable to decrypt message from Client " + fromClient + " (relay as-is)");
-                return message;
-            }
-
-            // 2) Affiche le message en clair (objectif de l'attaque)
-            System.out.println("[MITM] CLEARTEXT from Client " + fromClient + ": " + clear);
-
-            // 3) Rechiffre pour le destinataire avec la clé MITM <-> destinataire
-            SecretKey keyTo = getSessionKey(toClient);
-            String reEncrypted = encryptAesGcmBase64(keyTo, clear);
-
-            System.out.println("Relaying (MITM re-encrypt) from " + fromClient + " to client " + toClient);
-            return reEncrypted;
+        if (clear == null) {
+            System.out.println("[MITM] Unable to decrypt message from Client " + fromClient);
+            return message;
         }
 
-		System.out.println("Relaying from " + fromClient + " to client " + toClient + " : " + message);
-        return message;
+        System.out.println("[MITM] CLEARTEXT from Client " + fromClient + ": " + clear);
+
+        String reEncrypted = encryptAesGcmBase64(keyTo, clear);
+
+        System.out.println("Relaying from " + fromClient + " to client " + toClient);
+        return reEncrypted;
     }
 
-
-
-
-    // 3.4.2 - MITM ECDH ATTACK
-
-    // Active/désactive l'attaque MITM ECDH (3.4.2)
-    private static final boolean ENABLE_MITM_ECDH_ATTACK = false;
-
-    // Paramètres AES-GCM identiques à ceux des clients
     private static final int GCM_IV_LENGTH_BYTES = 12;
     private static final int GCM_TAG_LENGTH_BITS = 128;
 
-    // Aléa crypto pour IV GCM
     private final SecureRandom random = new SecureRandom();
 
-    // Stockage des états pour chaque client (index 1..2)
-    private KeyPair mitmKeyPairClient1;
-    private KeyPair mitmKeyPairClient2;
+    private static class ClientMitmState {
+        int handshakeStep = 0;
 
-    private SecretKey sessionKeyClient1; // clé AES entre MITM et Client 1
-    private SecretKey sessionKeyClient2; // clé AES entre MITM et Client 2
+        String clientEcdhPublicKeyB64;
+        String clientEcdsaPublicKeyB64;
+        String clientSignatureB64;
+
+        KeyPair mitmEcdhKeyPair;
+        KeyPair mitmEcdsaKeyPair;
+
+        String mitmEcdhPublicKeyB64;
+        String mitmEcdsaPublicKeyB64;
+        String mitmSignatureB64;
+
+        SecretKey sessionKey;
+    }
+
+    private final ClientMitmState client1State = new ClientMitmState();
+    private final ClientMitmState client2State = new ClientMitmState();
+
+    private ClientMitmState getState(int clientId) {
+        return (clientId == 1) ? client1State : client2State;
+    }
 
     private boolean isSessionKeyReady(int clientId) {
-        return (clientId == 1 && sessionKeyClient1 != null)
-                || (clientId == 2 && sessionKeyClient2 != null);
+        return getState(clientId).sessionKey != null;
     }
 
     private SecretKey getSessionKey(int clientId) {
-        return (clientId == 1) ? sessionKeyClient1 : sessionKeyClient2;
+        return getState(clientId).sessionKey;
     }
 
-    private KeyPair getOrCreateMitmKeyPair(int clientId) {
+    // Prépare le faux triplet signé que le MITM enverra à un client
+    private void ensureMitmHandshakeData(int clientId) {
         try {
-            if (clientId == 1 && mitmKeyPairClient1 != null) return mitmKeyPairClient1;
-            if (clientId == 2 && mitmKeyPairClient2 != null) return mitmKeyPairClient2;
+            ClientMitmState state = getState(clientId);
 
-            // Génère une paire ECDH côté MITM
-            KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
-            // 256 bits -> typiquement secp256r1 (≈ 128 bits de sécurité)
-            kpg.initialize(256);
-            KeyPair kp = kpg.generateKeyPair();
+            if (state.mitmEcdhKeyPair != null && state.mitmEcdsaKeyPair != null) {
+                return;
+            }
 
-            if (clientId == 1) mitmKeyPairClient1 = kp;
-            else mitmKeyPairClient2 = kp;
+            KeyPairGenerator ecGen = KeyPairGenerator.getInstance("EC");
+            ecGen.initialize(256);
 
-            return kp;
+            state.mitmEcdhKeyPair = ecGen.generateKeyPair();
+            state.mitmEcdsaKeyPair = ecGen.generateKeyPair();
+
+            byte[] mitmEcdhPublicKeyBytes = state.mitmEcdhKeyPair.getPublic().getEncoded();
+            byte[] mitmEcdsaPublicKeyBytes = state.mitmEcdsaKeyPair.getPublic().getEncoded();
+            byte[] mitmSignatureBytes = signWithEcdsa(mitmEcdhPublicKeyBytes, state.mitmEcdsaKeyPair);
+
+            state.mitmEcdhPublicKeyB64 = Base64.getEncoder().encodeToString(mitmEcdhPublicKeyBytes);
+            state.mitmEcdsaPublicKeyB64 = Base64.getEncoder().encodeToString(mitmEcdsaPublicKeyBytes);
+            state.mitmSignatureB64 = Base64.getEncoder().encodeToString(mitmSignatureBytes);
 
         } catch (Exception e) {
-            throw new RuntimeException("MITM: failed to create EC keypair", e);
+            throw new RuntimeException("MITM handshake preparation failed", e);
         }
     }
 
-    /**
-     Phase handshake MITM :
-     - Intercepte la clé publique envoyée par un client
-     - Dérive la clé AES de session MITM<->client
-     - Envoie au destinataire la clé publique MITM correspondant à SA session
-     */
-    private String handleMitmHandshake(String message, int fromClient, int toClient) {
+    // Signe une clé publique ECDH avec la clé privée ECDSA du MITM
+    private byte[] signWithEcdsa(byte[] data, KeyPair ecdsaKeyPair) throws Exception {
+        Signature signature = Signature.getInstance("SHA256withECDSA");
+        signature.initSign(ecdsaKeyPair.getPrivate());
+        signature.update(data);
+        return signature.sign();
+    }
+
+    // Dérive la clé AES MITM <-> client à partir de la clé publique ECDH du client
+    private SecretKey deriveSessionKeyFromClientPublicKey(String clientEcdhPublicKeyB64, KeyPair mitmEcdhKeyPair) throws Exception {
+        byte[] clientPubBytes = Base64.getDecoder().decode(clientEcdhPublicKeyB64);
+
+        KeyFactory keyFactory = KeyFactory.getInstance("EC");
+        X509EncodedKeySpec keySpec = new X509EncodedKeySpec(clientPubBytes);
+        PublicKey clientPublicKey = keyFactory.generatePublic(keySpec);
+
+        KeyAgreement ka = KeyAgreement.getInstance("ECDH");
+        ka.init(mitmEcdhKeyPair.getPrivate());
+        ka.doPhase(clientPublicKey, true);
+
+        byte[] sharedSecret = ka.generateSecret();
+
+        MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+        byte[] hash = sha256.digest(sharedSecret);
+        byte[] aesKeyBytes = Arrays.copyOf(hash, 16);
+
+        return new SecretKeySpec(aesKeyBytes, "AES");
+    }
+
+    // Intercepte le handshake signé et remplace les 3 lignes par celles du MITM
+    private String handleSignedMitmHandshake(String message, int fromClient, int toClient) {
         try {
-            System.out.println("[MITM] Intercepting ECDH public key from Client " + fromClient);
+            ClientMitmState fromState = getState(fromClient);
+            ClientMitmState toState = getState(toClient);
 
-            // 1) Decode la clé publique du client émetteur
-            byte[] clientPubBytes = Base64.getDecoder().decode(message);
-            KeyFactory kf = KeyFactory.getInstance("EC");
-            PublicKey clientPublicKey = kf.generatePublic(new X509EncodedKeySpec(clientPubBytes));
+            ensureMitmHandshakeData(toClient);
 
-            // 2) Assure qu'on a une paire MITM pour ce client
-            KeyPair mitmKpForFrom = getOrCreateMitmKeyPair(fromClient);
+            if (fromState.handshakeStep == 0) {
+                fromState.clientEcdhPublicKeyB64 = message;
+                fromState.handshakeStep = 1;
 
-            // 3) Calcule le secret partagé ECDH : privMITM(from) * pubClient(from)
-            KeyAgreement ka = KeyAgreement.getInstance("ECDH");
-            ka.init(mitmKpForFrom.getPrivate());
-            ka.doPhase(clientPublicKey, true);
-            byte[] sharedSecret = ka.generateSecret();
+                System.out.println("[MITM] Intercepted ECDH public key from Client " + fromClient);
+                return toState.mitmEcdhPublicKeyB64;
+            }
 
-            // 4) Dérive une clé AES-128 depuis sharedSecret (SHA-256 puis 16 premiers octets)
-            MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
-            byte[] hash = sha256.digest(sharedSecret);
-            byte[] aesKeyBytes = Arrays.copyOf(hash, 16);
-            SecretKey aesKey = new SecretKeySpec(aesKeyBytes, "AES");
+            if (fromState.handshakeStep == 1) {
+                fromState.clientEcdsaPublicKeyB64 = message;
+                fromState.handshakeStep = 2;
 
-            if (fromClient == 1) sessionKeyClient1 = aesKey;
-            else sessionKeyClient2 = aesKey;
+                System.out.println("[MITM] Intercepted ECDSA public key from Client " + fromClient);
+                return toState.mitmEcdsaPublicKeyB64;
+            }
 
-            System.out.println("[MITM] Session key established with Client " + fromClient);
+            if (fromState.handshakeStep == 2) {
+                fromState.clientSignatureB64 = message;
+                fromState.handshakeStep = 3;
 
-            // 5) Maintenant on renvoie AU destinataire la clé publique MITM associée à SA session (toClient)
-            KeyPair mitmKpForTo = getOrCreateMitmKeyPair(toClient);
+                fromState.sessionKey = deriveSessionKeyFromClientPublicKey(
+                        fromState.clientEcdhPublicKeyB64,
+                        fromState.mitmEcdhKeyPair
+                );
 
-            String mitmPubForToB64 = Base64.getEncoder().encodeToString(mitmKpForTo.getPublic().getEncoded());
+                System.out.println("[MITM] Intercepted signature from Client " + fromClient);
+                System.out.println("[MITM] Session key established with Client " + fromClient);
 
-            System.out.println("[MITM] Sending MITM public key to Client " + toClient + " (pretending it's the peer)");
-            return mitmPubForToB64;
+                return toState.mitmSignatureB64;
+            }
 
-        } catch (Exception e) {
-            System.out.println("[MITM] Handshake interception failed: " + e.getMessage());
-            // Si ça échoue, on relaye tel quel (pour ne pas tout casser)
             return message;
+
+        } catch (Exception e) {
+            throw new RuntimeException("MITM signed handshake failed", e);
         }
     }
 
-    /**
-     * Déchiffre un message AES-GCM encodé Base64 :
-     * format = Base64( IV(12) || (ciphertext||tag) )
-     * Retourne le clair, ou null si tag invalide / format incorrect.
-     */
     private String decryptAesGcmBase64(SecretKey aesKey, String encryptedB64) {
         try {
             byte[] packet = Base64.getDecoder().decode(encryptedB64);
 
             if (packet.length < GCM_IV_LENGTH_BYTES + 1) {
-                return null; // trop court
+                return null;
             }
 
             byte[] iv = Arrays.copyOfRange(packet, 0, GCM_IV_LENGTH_BYTES);
@@ -174,17 +197,12 @@ public class ServerInterceptor {
             return new String(clearBytes, StandardCharsets.UTF_8);
 
         } catch (AEADBadTagException e) {
-            // Tag invalide -> message altéré ou mauvaise clé
             return null;
         } catch (Exception e) {
             return null;
         }
     }
 
-    /**
-     * Chiffre en AES-GCM + Base64 :
-     * Base64( IV(12) || (ciphertext||tag) )
-     */
     private String encryptAesGcmBase64(SecretKey aesKey, String plainText) {
         try {
             byte[] iv = new byte[GCM_IV_LENGTH_BYTES];
@@ -202,7 +220,7 @@ public class ServerInterceptor {
             return Base64.getEncoder().encodeToString(packet);
 
         } catch (Exception e) {
-            throw new RuntimeException("MITM: AES-GCM encryption failed", e);
+            throw new RuntimeException("MITM AES-GCM encryption failed", e);
         }
     }
 }
