@@ -34,43 +34,43 @@ public class Interceptor {
         }
     }
 
-    // 3.2.3 - Chiffre le message en AES-256-CBC avec un IV aléatoire
-    // Format transmis : Base64(IV[16] || ciphertext)
+    // 3.3.1 - Chiffre le message en AES-256-GCM avec un nonce aléatoire de 12 octets
+    // Format transmis : Base64(nonce[12] || ciphertext+tag[16])
     public String beforeSend(String plainText) {
         try {
-            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            byte[] ivBytes = new byte[16];
-            new SecureRandom().nextBytes(ivBytes);
-            IvParameterSpec iv = new IvParameterSpec(ivBytes);
-            cipher.init(Cipher.ENCRYPT_MODE, aesKey, iv);
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            byte[] nonce = new byte[12];
+            new SecureRandom().nextBytes(nonce);
+            cipher.init(Cipher.ENCRYPT_MODE, aesKey, new GCMParameterSpec(128, nonce));
             byte[] ciphertext = cipher.doFinal(plainText.getBytes("UTF-8"));
 
-            // Préfixe l'IV au chiffré avant encodage Base64
-            byte[] ivAndCipher = new byte[ivBytes.length + ciphertext.length];
-            System.arraycopy(ivBytes, 0, ivAndCipher, 0, ivBytes.length);
-            System.arraycopy(ciphertext, 0, ivAndCipher, ivBytes.length, ciphertext.length);
+            // Préfixe le nonce au chiffré+tag avant encodage Base64
+            byte[] result = new byte[nonce.length + ciphertext.length];
+            System.arraycopy(nonce, 0, result, 0, nonce.length);
+            System.arraycopy(ciphertext, 0, result, nonce.length, ciphertext.length);
 
-            return Base64.getEncoder().encodeToString(ivAndCipher);
+            return Base64.getEncoder().encodeToString(result);
         } catch (Exception e) {
             throw new RuntimeException("Encryption failed", e);
         }
     }
 
-    // 3.2.3 - Déchiffre un message AES-256-CBC
-    // Extrait l'IV (16 premiers octets) puis déchiffre le reste
+    // 3.3.1 - Déchiffre un message AES-256-GCM
+    // Extrait le nonce (12 premiers octets), vérifie le tag et déchiffre
+    // Lève une exception si le message a été modifié (AEADBadTagException)
     public String afterReceive(String encryptedText) {
         try {
-            byte[] ivAndCipher = Base64.getDecoder().decode(encryptedText);
-            byte[] ivBytes = new byte[16];
-            byte[] ciphertext = new byte[ivAndCipher.length - 16];
-            System.arraycopy(ivAndCipher, 0, ivBytes, 0, 16);
-            System.arraycopy(ivAndCipher, 16, ciphertext, 0, ciphertext.length);
+            byte[] data = Base64.getDecoder().decode(encryptedText);
+            byte[] nonce = new byte[12];
+            byte[] ciphertext = new byte[data.length - 12];
+            System.arraycopy(data, 0, nonce, 0, 12);
+            System.arraycopy(data, 12, ciphertext, 0, ciphertext.length);
 
-            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            cipher.init(Cipher.DECRYPT_MODE, aesKey, new IvParameterSpec(ivBytes));
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.DECRYPT_MODE, aesKey, new GCMParameterSpec(128, nonce));
             return new String(cipher.doFinal(ciphertext), "UTF-8");
         } catch (Exception e) {
-            return "[Decryption failed: " + e.getMessage() + "]";
+            return "[Decryption failed - message may have been tampered: " + e.getMessage() + "]";
         }
     }
 }
