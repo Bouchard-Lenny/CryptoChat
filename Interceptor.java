@@ -10,25 +10,41 @@ public class Interceptor {
 
     private SecretKey aesKey;
 
-    // 3.2.1/3.2.2 - Reçoit le mot de passe et dérive une clé AES-256 via SHA-256
-    public Interceptor(String password) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] keyBytes = digest.digest(password.getBytes("UTF-8"));
-            this.aesKey = new SecretKeySpec(keyBytes, "AES");
-            System.out.println("[Interceptor] AES-256 key derived from password.");
-        } catch (Exception e) {
-            throw new RuntimeException("Key derivation failed", e);
-        }
-    }
+    public Interceptor() {}
 
+    // 3.4.1 - Échange de clé ECDH éphémère :
+    // Génère une paire de clés EC, envoie la clé publique, reçoit celle de l'autre client,
+    // calcule le secret partagé et en dérive la clé AES-256 via SHA-256.
     public void onHandshake(BufferedReader input, PrintWriter output) throws IOException {
         try {
-            System.out.println("[Interceptor] Starting handshake");
+            System.out.println("[Interceptor] Starting ECDH handshake...");
 
-            
+            // Génération de la paire de clés éphémère sur la courbe P-256
+            KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
+            kpg.initialize(new ECGenParameterSpec("secp256r1"));
+            KeyPair keyPair = kpg.generateKeyPair();
 
-            System.out.println("[Interceptor] Handshake complete!");
+            // Envoi de la clé publique (encodage X.509, Base64)
+            String pubKeyB64 = Base64.getEncoder().encodeToString(keyPair.getPublic().getEncoded());
+            output.println(pubKeyB64);
+
+            // Réception de la clé publique de l'autre client
+            String otherPubKeyB64 = input.readLine();
+            byte[] otherPubKeyBytes = Base64.getDecoder().decode(otherPubKeyB64);
+            PublicKey otherPublicKey = KeyFactory.getInstance("EC")
+                    .generatePublic(new X509EncodedKeySpec(otherPubKeyBytes));
+
+            // Calcul du secret partagé ECDH
+            KeyAgreement ka = KeyAgreement.getInstance("ECDH");
+            ka.init(keyPair.getPrivate());
+            ka.doPhase(otherPublicKey, true);
+            byte[] sharedSecret = ka.generateSecret();
+
+            // Dérivation de la clé AES-256 via SHA-256 sur le secret partagé
+            byte[] keyBytes = MessageDigest.getInstance("SHA-256").digest(sharedSecret);
+            this.aesKey = new SecretKeySpec(keyBytes, "AES");
+
+            System.out.println("[Interceptor] ECDH handshake complete. AES-256 session key derived.");
         } catch (Exception e) {
             throw new IOException("Handshake failed", e);
         }
