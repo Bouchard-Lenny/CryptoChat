@@ -13,14 +13,19 @@ public class Client {
     private Interceptor interceptor;
     private volatile boolean running;
 
-    public Client() {
-        this.interceptor = new Interceptor();
+    public Client(String privatKeyPath, String publicKeyPath) {
+        this.interceptor = new Interceptor(privatKeyPath, publicKeyPath);
         this.running = true;
     }
 
     public static void main(String[] args) {
+        // 3.5.1 - La paire de clés ECDSA long terme est obligatoire au démarrage
+        if (args.length < 2) {
+            System.err.println("Usage: java Client <private_key.pem> <public_key.pem>");
+            System.exit(1);
+        }
         System.out.println("Starting client ...");
-        Client client = new Client();
+        Client client = new Client(args[0], args[1]);
         client.start();
     }
 

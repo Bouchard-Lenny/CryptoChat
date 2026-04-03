@@ -1,4 +1,5 @@
 import java.io.*;
+import java.nio.file.*;
 import java.security.*;
 import java.security.spec.*;
 import java.util.Base64;
@@ -9,42 +10,90 @@ import javax.crypto.spec.*;
 public class Interceptor {
 
     private SecretKey aesKey;
+    private PrivateKey ecdsaPrivateKey;
+    private PublicKey ecdsaPublicKey;
 
-    public Interceptor() {}
+    // 3.5.1 - Charge la paire de clés ECDSA long terme depuis les fichiers PEM
+    public Interceptor(String privateKeyPath, String publicKeyPath) {
+        try {
+            ecdsaPrivateKey = loadPrivateKey(privateKeyPath);
+            ecdsaPublicKey  = loadPublicKey(publicKeyPath);
+            System.out.println("[Interceptor] ECDSA long-term key pair loaded.");
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to load ECDSA keys", e);
+        }
+    }
 
-    // 3.4.1 - Échange de clé ECDH éphémère :
-    // Génère une paire de clés EC, envoie la clé publique, reçoit celle de l'autre client,
-    // calcule le secret partagé et en dérive la clé AES-256 via SHA-256.
+    // Charge une clé privée ECDSA depuis un fichier PEM (format PKCS8)
+    private PrivateKey loadPrivateKey(String path) throws Exception {
+        String pem = new String(Files.readAllBytes(Paths.get(path)));
+        String b64 = pem.replaceAll("-----[^-]+-----", "").replaceAll("\\s", "");
+        byte[] keyBytes = Base64.getDecoder().decode(b64);
+        return KeyFactory.getInstance("EC").generatePrivate(new PKCS8EncodedKeySpec(keyBytes));
+    }
+
+    // Charge une clé publique ECDSA depuis un fichier PEM (format X.509)
+    private PublicKey loadPublicKey(String path) throws Exception {
+        String pem = new String(Files.readAllBytes(Paths.get(path)));
+        String b64 = pem.replaceAll("-----[^-]+-----", "").replaceAll("\\s", "");
+        byte[] keyBytes = Base64.getDecoder().decode(b64);
+        return KeyFactory.getInstance("EC").generatePublic(new X509EncodedKeySpec(keyBytes));
+    }
+
+    // 3.5.2 - Handshake ECDH avec signature ECDSA de la clé publique éphémère.
+    // Format envoyé : Base64(ecdh_pubkey)|Base64(ecdsa_pubkey)|Base64(signature)
+    // La signature porte sur les octets de la clé publique ECDH (SHA256withECDSA).
     public void onHandshake(BufferedReader input, PrintWriter output) throws IOException {
         try {
-            System.out.println("[Interceptor] Starting ECDH handshake...");
+            System.out.println("[Interceptor] Starting ECDH handshake with ECDSA signature...");
 
-            // Génération de la paire de clés éphémère sur la courbe P-256
+            // Génération de la paire de clés ECDH éphémère
             KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
             kpg.initialize(new ECGenParameterSpec("secp256r1"));
-            KeyPair keyPair = kpg.generateKeyPair();
+            KeyPair ecdhKeyPair = kpg.generateKeyPair();
+            byte[] ecdhPubBytes = ecdhKeyPair.getPublic().getEncoded();
 
-            // Envoi de la clé publique (encodage X.509, Base64)
-            String pubKeyB64 = Base64.getEncoder().encodeToString(keyPair.getPublic().getEncoded());
-            output.println(pubKeyB64);
+            // Signature de la clé publique ECDH avec la clé privée ECDSA long terme
+            Signature signer = Signature.getInstance("SHA256withECDSA");
+            signer.initSign(ecdsaPrivateKey);
+            signer.update(ecdhPubBytes);
+            byte[] signature = signer.sign();
 
-            // Réception de la clé publique de l'autre client
-            String otherPubKeyB64 = input.readLine();
-            byte[] otherPubKeyBytes = Base64.getDecoder().decode(otherPubKeyB64);
-            PublicKey otherPublicKey = KeyFactory.getInstance("EC")
-                    .generatePublic(new X509EncodedKeySpec(otherPubKeyBytes));
+            // Envoi : ecdh_pubkey | ecdsa_pubkey | signature
+            String message = Base64.getEncoder().encodeToString(ecdhPubBytes) + "|"
+                    + Base64.getEncoder().encodeToString(ecdsaPublicKey.getEncoded()) + "|"
+                    + Base64.getEncoder().encodeToString(signature);
+            output.println(message);
 
-            // Calcul du secret partagé ECDH
+            // Réception du message de l'autre client
+            String[] parts = input.readLine().split("\\|");
+            byte[] otherEcdhPubBytes  = Base64.getDecoder().decode(parts[0]);
+            byte[] otherEcdsaPubBytes = Base64.getDecoder().decode(parts[1]);
+            byte[] otherSignature     = Base64.getDecoder().decode(parts[2]);
+
+            // Vérification de la signature ECDSA sur la clé ECDH reçue
+            PublicKey otherEcdsaKey = KeyFactory.getInstance("EC")
+                    .generatePublic(new X509EncodedKeySpec(otherEcdsaPubBytes));
+            Signature verifier = Signature.getInstance("SHA256withECDSA");
+            verifier.initVerify(otherEcdsaKey);
+            verifier.update(otherEcdhPubBytes);
+            if (!verifier.verify(otherSignature)) {
+                throw new IOException("ECDSA signature verification failed — possible MitM attack!");
+            }
+            System.out.println("[Interceptor] ECDSA signature verified.");
+
+            // Calcul du secret partagé ECDH et dérivation de la clé AES-256
+            PublicKey otherEcdhKey = KeyFactory.getInstance("EC")
+                    .generatePublic(new X509EncodedKeySpec(otherEcdhPubBytes));
             KeyAgreement ka = KeyAgreement.getInstance("ECDH");
-            ka.init(keyPair.getPrivate());
-            ka.doPhase(otherPublicKey, true);
-            byte[] sharedSecret = ka.generateSecret();
-
-            // Dérivation de la clé AES-256 via SHA-256 sur le secret partagé
-            byte[] keyBytes = MessageDigest.getInstance("SHA-256").digest(sharedSecret);
+            ka.init(ecdhKeyPair.getPrivate());
+            ka.doPhase(otherEcdhKey, true);
+            byte[] keyBytes = MessageDigest.getInstance("SHA-256").digest(ka.generateSecret());
             this.aesKey = new SecretKeySpec(keyBytes, "AES");
 
             System.out.println("[Interceptor] ECDH handshake complete. AES-256 session key derived.");
+        } catch (IOException e) {
+            throw e;
         } catch (Exception e) {
             throw new IOException("Handshake failed", e);
         }

@@ -7,16 +7,18 @@ import javax.crypto.spec.*;
 
 public class ServerInterceptor {
 
-    // Clés éphémères de l'attaquant (une paire par client)
-    private Map<Integer, KeyPair> attackerKeyPairs = new HashMap<>();
-    // Vraies clés publiques des clients (interceptées)
-    private Map<Integer, PublicKey> clientRealKeys = new HashMap<>();
-    // Clés AES de session dérivées par l'attaquant (une par client)
+    // Clés ECDH éphémères de l'attaquant (une paire par client)
+    private Map<Integer, KeyPair> attackerECDHPairs = new HashMap<>();
+    // Clés ECDSA éphémères de l'attaquant (une paire par client, pour signer vers l'autre)
+    private Map<Integer, KeyPair> attackerECDSAPairs = new HashMap<>();
+    // Vraies clés ECDH publiques des clients (interceptées)
+    private Map<Integer, PublicKey> clientRealECDHKeys = new HashMap<>();
+    // Clés AES de session dérivées par l'attaquant
     private Map<Integer, SecretKey> sessionKeys = new HashMap<>();
     private int keysReceived = 0;
 
     public ServerInterceptor() {
-        System.out.println("[Server] MitM ECDH attack mode");
+        System.out.println("[Server] MitM ECDH+ECDSA attack mode");
     }
 
     public String onMessageRelay(String message, int fromClient, int toClient) {
@@ -27,40 +29,52 @@ public class ServerInterceptor {
         }
     }
 
-    // 3.4.2 - Phase handshake : substitue la clé publique ECDH de chaque client
-    // par celle de l'attaquant, puis dérive les clés de session avec chacun
+    // 3.5.3 - Substitue les clés ECDH et ECDSA de l'attaquant à celles du vrai client.
+    // La signature est valide car signée par la clé ECDSA de l'attaquant elle-même.
+    // Le client destinataire ne peut pas détecter la fraude sans certificat.
     private String interceptHandshake(String message, int fromClient, int toClient) {
         try {
-            // Récupère la vraie clé publique du client
-            PublicKey clientPubKey = KeyFactory.getInstance("EC")
-                    .generatePublic(new X509EncodedKeySpec(Base64.getDecoder().decode(message)));
-            clientRealKeys.put(fromClient, clientPubKey);
+            String[] parts = message.split("\\|");
+            byte[] realECDHPubBytes = Base64.getDecoder().decode(parts[0]);
+            PublicKey realECDHKey = KeyFactory.getInstance("EC")
+                    .generatePublic(new X509EncodedKeySpec(realECDHPubBytes));
+            clientRealECDHKeys.put(fromClient, realECDHKey);
 
-            // Génère une paire de clés éphémère pour cette session
+            // Génère une paire ECDH éphémère de l'attaquant pour ce client
             KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
             kpg.initialize(new ECGenParameterSpec("secp256r1"));
-            KeyPair attackerKP = kpg.generateKeyPair();
-            attackerKeyPairs.put(fromClient, attackerKP);
+            KeyPair attackerECDH = kpg.generateKeyPair();
+            attackerECDHPairs.put(fromClient, attackerECDH);
+
+            // Génère une paire ECDSA éphémère de l'attaquant pour signer vers le destinataire
+            KeyPair attackerECDSA = kpg.generateKeyPair();
+            attackerECDSAPairs.put(fromClient, attackerECDSA);
+
+            // Signe la clé ECDH de l'attaquant avec sa propre clé ECDSA
+            Signature signer = Signature.getInstance("SHA256withECDSA");
+            signer.initSign(attackerECDSA.getPrivate());
+            signer.update(attackerECDH.getPublic().getEncoded());
+            byte[] fakeSignature = signer.sign();
 
             keysReceived++;
 
-            // Dès que les deux clés sont reçues, dérive les clés AES avec chaque client.
-            // Pour le session key avec clientId X, on utilise la paire envoyée À X,
-            // c'est-à-dire attackerKeyPairs[otherClient] (celle interceptée depuis l'autre côté).
             if (keysReceived == 2) {
-                for (int clientId : clientRealKeys.keySet()) {
+                // Dérive les clés de session avec chaque client (même logique que 3.4.2)
+                for (int clientId : clientRealECDHKeys.keySet()) {
                     int otherClientId = (clientId == 1) ? 2 : 1;
                     KeyAgreement ka = KeyAgreement.getInstance("ECDH");
-                    ka.init(attackerKeyPairs.get(otherClientId).getPrivate());
-                    ka.doPhase(clientRealKeys.get(clientId), true);
+                    ka.init(attackerECDHPairs.get(otherClientId).getPrivate());
+                    ka.doPhase(clientRealECDHKeys.get(clientId), true);
                     byte[] keyBytes = MessageDigest.getInstance("SHA-256").digest(ka.generateSecret());
                     sessionKeys.put(clientId, new SecretKeySpec(keyBytes, "AES"));
                 }
-                System.out.println("[MitM] ECDH interception complete. Session keys derived for both clients.");
+                System.out.println("[MitM] ECDH+ECDSA interception complete. Session keys derived.");
             }
 
-            // Renvoie la clé publique de l'attaquant à la place de la vraie
-            return Base64.getEncoder().encodeToString(attackerKP.getPublic().getEncoded());
+            // Renvoie les clés de l'attaquant avec une signature valide (mais frauduleuse)
+            return Base64.getEncoder().encodeToString(attackerECDH.getPublic().getEncoded()) + "|"
+                    + Base64.getEncoder().encodeToString(attackerECDSA.getPublic().getEncoded()) + "|"
+                    + Base64.getEncoder().encodeToString(fakeSignature);
 
         } catch (Exception e) {
             System.out.println("[MitM] Handshake interception failed: " + e.getMessage());
@@ -68,22 +82,20 @@ public class ServerInterceptor {
         }
     }
 
-    // 3.4.2 - Phase chat : déchiffre le message avec la clé du client émetteur,
-    // affiche le plaintext, puis réencrypte avec la clé du client destinataire
+    // Déchiffre avec la clé du client émetteur, affiche le plaintext,
+    // réencrypte avec la clé du client destinataire
     private String interceptMessage(String message, int fromClient, int toClient) {
         try {
             byte[] data = Base64.getDecoder().decode(message);
             byte[] nonce = Arrays.copyOfRange(data, 0, 12);
             byte[] ciphertext = Arrays.copyOfRange(data, 12, data.length);
 
-            // Déchiffrement avec la clé de session du client émetteur
             Cipher dec = Cipher.getInstance("AES/GCM/NoPadding");
             dec.init(Cipher.DECRYPT_MODE, sessionKeys.get(fromClient), new GCMParameterSpec(128, nonce));
             byte[] plaintext = dec.doFinal(ciphertext);
             System.out.println("[MitM] Client " + fromClient + " -> Client " + toClient
                     + " : " + new String(plaintext, "UTF-8"));
 
-            // Réencryptage avec la clé de session du client destinataire
             byte[] newNonce = new byte[12];
             new SecureRandom().nextBytes(newNonce);
             Cipher enc = Cipher.getInstance("AES/GCM/NoPadding");
