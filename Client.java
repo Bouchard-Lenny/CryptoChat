@@ -13,14 +13,19 @@ public class Client {
     private Interceptor interceptor;
     private volatile boolean running;
 
-    public Client() {
-        this.interceptor = new Interceptor();
+    public Client(String password) {
+        this.interceptor = new Interceptor(password);
         this.running = true;
     }
 
     public static void main(String[] args) {
+        // 3.2.1 - Le mot de passe est obligatoire en argument de lancement
+        if (args.length < 1) {
+            System.err.println("Usage: java Client <password>");
+            System.exit(1);
+        }
         System.out.println("Starting client ...");
-        Client client = new Client();
+        Client client = new Client(args[0]);
         client.start();
     }
 
