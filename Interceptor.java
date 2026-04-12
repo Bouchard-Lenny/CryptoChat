@@ -16,6 +16,10 @@ public class Interceptor {
     private X509Certificate clientCert;
     private X509Certificate caCert;
 
+    // 3.7.2 - Compteurs de séquence pour détecter rejeu et suppression
+    private long sendCounter     = 0;
+    private long expectedCounter = 0;
+
     // 3.6.3 - Charge la clé privée, le certificat client et le certificat CA au démarrage
     // La clé publique ECDSA est extraite du certificat (plus besoin de client_public.pem)
     public Interceptor(String privateKeyPath, String clientCertPath, String caCertPath) {
@@ -112,7 +116,8 @@ public class Interceptor {
         }
     }
 
-    // 3.3.1 - Chiffre le message en AES-256-GCM avec un nonce aléatoire de 12 octets
+    // 3.3.1 / 3.7.2 - Chiffre le message en AES-256-GCM avec un nonce aléatoire de 12 octets
+    // Le numéro de séquence est inclus dans le plaintext avant chiffrement (protégé par GCM)
     // Format transmis : Base64(nonce[12] || ciphertext+tag[16])
     public String beforeSend(String plainText) {
         try {
@@ -120,7 +125,9 @@ public class Interceptor {
             byte[] nonce = new byte[12];
             new SecureRandom().nextBytes(nonce);
             cipher.init(Cipher.ENCRYPT_MODE, aesKey, new GCMParameterSpec(128, nonce));
-            byte[] ciphertext = cipher.doFinal(plainText.getBytes("UTF-8"));
+            String payload = sendCounter + ":" + plainText;
+            sendCounter++;
+            byte[] ciphertext = cipher.doFinal(payload.getBytes("UTF-8"));
 
             // Préfixe le nonce au chiffré+tag avant encodage Base64
             byte[] result = new byte[nonce.length + ciphertext.length];
@@ -133,9 +140,8 @@ public class Interceptor {
         }
     }
 
-    // 3.3.1 - Déchiffre un message AES-256-GCM
-    // Extrait le nonce (12 premiers octets), vérifie le tag et déchiffre
-    // Lève une exception si le message a été modifié (AEADBadTagException)
+    // 3.3.1 / 3.7.2 - Déchiffre un message AES-256-GCM et vérifie le numéro de séquence
+    // Rejette le message si le numéro est incorrect (rejeu ou suppression détectés)
     public String afterReceive(String encryptedText) {
         try {
             byte[] data = Base64.getDecoder().decode(encryptedText);
@@ -146,7 +152,19 @@ public class Interceptor {
 
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.DECRYPT_MODE, aesKey, new GCMParameterSpec(128, nonce));
-            return new String(cipher.doFinal(ciphertext), "UTF-8");
+            String payload = new String(cipher.doFinal(ciphertext), "UTF-8");
+
+            // Extraction et vérification du numéro de séquence
+            int sep = payload.indexOf(':');
+            long seqNum = Long.parseLong(payload.substring(0, sep));
+            String message = payload.substring(sep + 1);
+
+            if (seqNum != expectedCounter) {
+                return "[Alerte sécurité : numéro de séquence attendu " + expectedCounter
+                        + ", reçu " + seqNum + " — rejeu ou suppression détecté !]";
+            }
+            expectedCounter++;
+            return message;
         } catch (Exception e) {
             return "[Decryption failed - message may have been tampered: " + e.getMessage() + "]";
         }

@@ -31,12 +31,16 @@ public class Server {
 
     // Server-side interceptor for MITM attack simulation
     // Students can implement various attacks here to test their protocol's security
-    private static ServerInterceptor serverInterceptor = new ServerInterceptor();
+    private static ServerInterceptor serverInterceptor;
 
     /**
      * Main entry point for the server application
      */
     public static void main(String[] args) {
+        // 3.7.1 - Mode d'attaque optionnel : java Server [rejeu|suppression]
+        String mode = args.length > 0 ? args[0] : "honest";
+        serverInterceptor = new ServerInterceptor(mode);
+
         System.out.println("=== Crypto Chat Server ===");
         System.out.println("Starting server on port " + PORT + "...");
 
@@ -129,6 +133,11 @@ public class Server {
      *
      * @param clientHandler The client handler to remove
      */
+    // 3.7.1 - Expose la liste des clients pour que ServerInterceptor puisse rejouer des messages
+    public static List<ClientHandler> getClients() {
+        return clients;
+    }
+
     public static void removeClient(ClientHandler clientHandler) {
         synchronized (clients) {
             clients.remove(clientHandler);
