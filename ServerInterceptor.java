@@ -18,9 +18,11 @@ public class ServerInterceptor {
     private int keysReceived = 0;
 
     public ServerInterceptor() {
-        System.out.println("[Server] MitM ECDH+ECDSA attack mode");
+        System.out.println("[Server] Honest relay mode");
     }
 
+    // 3.6.5 - Attaque MitM réactivée : l'attaquant substitue ses propres clés
+    // mais ne peut pas produire un certificat signé par la CA de confiance → détecté
     public String onMessageRelay(String message, int fromClient, int toClient) {
         if (keysReceived < 2) {
             return interceptHandshake(message, fromClient, toClient);

@@ -13,19 +13,19 @@ public class Client {
     private Interceptor interceptor;
     private volatile boolean running;
 
-    public Client(String privatKeyPath, String publicKeyPath) {
-        this.interceptor = new Interceptor(privatKeyPath, publicKeyPath);
+    public Client(String privateKeyPath, String clientCertPath, String caCertPath) {
+        this.interceptor = new Interceptor(privateKeyPath, clientCertPath, caCertPath);
         this.running = true;
     }
 
     public static void main(String[] args) {
-        // 3.5.1 - La paire de clés ECDSA long terme est obligatoire au démarrage
-        if (args.length < 2) {
-            System.err.println("Usage: java Client <private_key.pem> <public_key.pem>");
+        // 3.6.3 - Clé privée, certificat client et certificat CA obligatoires au démarrage
+        if (args.length < 3) {
+            System.err.println("Usage: java Client <private_key.pem> <client_cert.pem> <ca_cert.pem>");
             System.exit(1);
         }
         System.out.println("Starting client ...");
-        Client client = new Client(args[0], args[1]);
+        Client client = new Client(args[0], args[1], args[2]);
         client.start();
     }
 

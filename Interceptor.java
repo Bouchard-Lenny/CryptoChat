@@ -1,26 +1,32 @@
 import java.io.*;
 import java.nio.file.*;
 import java.security.*;
+import java.security.cert.*;
 import java.security.spec.*;
 import java.util.Base64;
 import javax.crypto.*;
 import javax.crypto.spec.*;
+import java.io.ByteArrayInputStream;
 
 
 public class Interceptor {
 
     private SecretKey aesKey;
     private PrivateKey ecdsaPrivateKey;
-    private PublicKey ecdsaPublicKey;
+    private X509Certificate clientCert;
+    private X509Certificate caCert;
 
-    // 3.5.1 - Charge la paire de clés ECDSA long terme depuis les fichiers PEM
-    public Interceptor(String privateKeyPath, String publicKeyPath) {
+    // 3.6.3 - Charge la clé privée, le certificat client et le certificat CA au démarrage
+    // La clé publique ECDSA est extraite du certificat (plus besoin de client_public.pem)
+    public Interceptor(String privateKeyPath, String clientCertPath, String caCertPath) {
         try {
             ecdsaPrivateKey = loadPrivateKey(privateKeyPath);
-            ecdsaPublicKey  = loadPublicKey(publicKeyPath);
-            System.out.println("[Interceptor] ECDSA long-term key pair loaded.");
+            clientCert      = loadCertificate(clientCertPath);
+            caCert          = loadCertificate(caCertPath);
+            System.out.println("[Interceptor] Loaded key, certificate ("
+                    + clientCert.getSubjectX500Principal().getName() + "), CA cert.");
         } catch (Exception e) {
-            throw new RuntimeException("Failed to load ECDSA keys", e);
+            throw new RuntimeException("Failed to load credentials", e);
         }
     }
 
@@ -32,20 +38,21 @@ public class Interceptor {
         return KeyFactory.getInstance("EC").generatePrivate(new PKCS8EncodedKeySpec(keyBytes));
     }
 
-    // Charge une clé publique ECDSA depuis un fichier PEM (format X.509)
-    private PublicKey loadPublicKey(String path) throws Exception {
-        String pem = new String(Files.readAllBytes(Paths.get(path)));
-        String b64 = pem.replaceAll("-----[^-]+-----", "").replaceAll("\\s", "");
-        byte[] keyBytes = Base64.getDecoder().decode(b64);
-        return KeyFactory.getInstance("EC").generatePublic(new X509EncodedKeySpec(keyBytes));
+    // Charge un certificat X.509 depuis un fichier PEM
+    private X509Certificate loadCertificate(String path) throws Exception {
+        try (FileInputStream fis = new FileInputStream(path)) {
+            return (X509Certificate) CertificateFactory.getInstance("X.509")
+                    .generateCertificate(fis);
+        }
     }
 
-    // 3.5.2 - Handshake ECDH avec signature ECDSA de la clé publique éphémère.
-    // Format envoyé : Base64(ecdh_pubkey)|Base64(ecdsa_pubkey)|Base64(signature)
-    // La signature porte sur les octets de la clé publique ECDH (SHA256withECDSA).
+    // 3.6.4 - Handshake ECDH avec échange de certificats X.509.
+    // Format : Base64(ecdh_pubkey)|Base64(certificate_DER)|Base64(signature)
+    // Vérifie que le certificat reçu est signé par la CA de confiance,
+    // puis vérifie la signature ECDH avec la clé publique du certificat.
     public void onHandshake(BufferedReader input, PrintWriter output) throws IOException {
         try {
-            System.out.println("[Interceptor] Starting ECDH handshake with ECDSA signature...");
+            System.out.println("[Interceptor] Starting ECDH handshake with certificate exchange...");
 
             // Génération de la paire de clés ECDH éphémère
             KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
@@ -53,34 +60,40 @@ public class Interceptor {
             KeyPair ecdhKeyPair = kpg.generateKeyPair();
             byte[] ecdhPubBytes = ecdhKeyPair.getPublic().getEncoded();
 
-            // Signature de la clé publique ECDH avec la clé privée ECDSA long terme
+            // Signature de la clé ECDH éphémère avec la clé privée ECDSA long terme
             Signature signer = Signature.getInstance("SHA256withECDSA");
             signer.initSign(ecdsaPrivateKey);
             signer.update(ecdhPubBytes);
             byte[] signature = signer.sign();
 
-            // Envoi : ecdh_pubkey | ecdsa_pubkey | signature
-            String message = Base64.getEncoder().encodeToString(ecdhPubBytes) + "|"
-                    + Base64.getEncoder().encodeToString(ecdsaPublicKey.getEncoded()) + "|"
+            // Envoi : ecdh_pubkey | certificat_DER | signature
+            String msg = Base64.getEncoder().encodeToString(ecdhPubBytes) + "|"
+                    + Base64.getEncoder().encodeToString(clientCert.getEncoded()) + "|"
                     + Base64.getEncoder().encodeToString(signature);
-            output.println(message);
+            output.println(msg);
 
             // Réception du message de l'autre client
             String[] parts = input.readLine().split("\\|");
-            byte[] otherEcdhPubBytes  = Base64.getDecoder().decode(parts[0]);
-            byte[] otherEcdsaPubBytes = Base64.getDecoder().decode(parts[1]);
-            byte[] otherSignature     = Base64.getDecoder().decode(parts[2]);
+            byte[] otherEcdhPubBytes = Base64.getDecoder().decode(parts[0]);
+            byte[] otherCertBytes    = Base64.getDecoder().decode(parts[1]);
+            byte[] otherSignature    = Base64.getDecoder().decode(parts[2]);
 
-            // Vérification de la signature ECDSA sur la clé ECDH reçue
-            PublicKey otherEcdsaKey = KeyFactory.getInstance("EC")
-                    .generatePublic(new X509EncodedKeySpec(otherEcdsaPubBytes));
+            // Reconstruction et vérification du certificat reçu via la CA de confiance
+            X509Certificate otherCert = (X509Certificate) CertificateFactory.getInstance("X.509")
+                    .generateCertificate(new ByteArrayInputStream(otherCertBytes));
+            otherCert.verify(caCert.getPublicKey());
+            otherCert.checkValidity();
+            String remoteIdentity = otherCert.getSubjectX500Principal().getName();
+            System.out.println("[Interceptor] Certificate valid. Remote identity: " + remoteIdentity);
+
+            // Vérification de la signature ECDH avec la clé publique du certificat
             Signature verifier = Signature.getInstance("SHA256withECDSA");
-            verifier.initVerify(otherEcdsaKey);
+            verifier.initVerify(otherCert.getPublicKey());
             verifier.update(otherEcdhPubBytes);
             if (!verifier.verify(otherSignature)) {
-                throw new IOException("ECDSA signature verification failed — possible MitM attack!");
+                throw new IOException("ECDH signature verification failed — possible MitM attack!");
             }
-            System.out.println("[Interceptor] ECDSA signature verified.");
+            System.out.println("[Interceptor] ECDH signature verified.");
 
             // Calcul du secret partagé ECDH et dérivation de la clé AES-256
             PublicKey otherEcdhKey = KeyFactory.getInstance("EC")
